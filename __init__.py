@@ -13,6 +13,7 @@ from keras import backend as K
 from keras.layers import Input
 from PIL import Image
 import colorsys
+import math
 
 from imageai.Detection.YOLOv3.models import yolo_main, tiny_yolo_main
 from imageai.Detection.YOLOv3.utils import letterbox_image, yolo_eval
@@ -900,7 +901,6 @@ class VideoObjectDetection:
                      or the detectCustomObjectsFromVideo() of  the object detection instance object at anytime to
                      obtain observable objects in any video or camera live stream.
     """
-
     def __init__(self):
         self.__modelType = ""
         self.modelPath = ""
@@ -914,6 +914,23 @@ class VideoObjectDetection:
         self.velocity2=[0.0]*10
         self.acceleration=[0.0]*10
         self.heading=[0.0]*10
+        self.trackers=[]
+        self.ROI_YMAX=270
+        self.FRAME_WIDTH=640
+        self.FRAME_HEIGHT=360
+        self.START_LINE = 20
+        self.cars=0
+
+
+
+        self.WHITE = (255, 255, 255)
+        self.YELLOW = (66, 244, 238)
+        self.GREEN = (80, 220, 60)
+        self.LIGHT_CYAN = (255, 255, 224)
+        self.DARK_BLUE = (139, 0, 0)
+        self.GRAY = (128, 128, 128)
+        
+
 
         self.numbers_to_names = {0: 'person', 1: 'bicycle', 2: 'car', 3: 'motorcycle', 4: 'airplane', 5: 'bus',
                                  6: 'train',
@@ -954,6 +971,162 @@ class VideoObjectDetection:
         # Unique instance variables for TinyYOLOv3.
         self.__tiny_yolo_anchors = np.array(
             [[10., 14.], [23., 27.], [37., 58.], [81., 82.], [135., 169.], [344., 319.]])
+
+    def label_object(self,color, textcolor, fontface, image, car, textsize, thickness, xmax, xmid, xmin, ymax, ymid, ymin):
+        cv2.rectangle(image, (xmin, ymin), (xmax, ymax), color, thickness)
+        pos = (xmid - textsize[0]//2, ymid + textsize[1]//2)
+        cv2.putText(image, car, pos, fontface, 1, textcolor, thickness, cv2.LINE_AA)
+
+
+    def update_trackers(self, image, counters):
+        left_lane = counters['left_lane']
+        right_lane = counters['right_lane']
+        boxes = []
+        color = (80, 220, 60)
+        fontface = cv2.FONT_HERSHEY_SIMPLEX
+        fontscale = 1
+        thickness = 1
+
+        for n, pair in enumerate(self.trackers):
+            tracker, car = pair
+            textsize, _baseline = cv2.getTextSize(
+                car, fontface, fontscale, thickness)
+            success, bbox = tracker.update(image)
+
+            if not success:
+                counters['lost_trackers'] += 1
+                del self.trackers[n]
+                continue
+
+            boxes.append(bbox)  # Return updated box list
+
+            xmin = int(bbox[0])
+            ymin = int(bbox[1])
+            xmax = int(bbox[0] + bbox[2])
+            ymax = int(bbox[1] + bbox[3])
+            xmid = int(round((xmin+xmax)/2))
+            ymid = int(round((ymin+ymax)/2))
+
+            if(xmid<(self.FRAME_WIDTH/5)):
+                if ymid >= self.ROI_YMAX:
+                    self.label_object(self.WHITE, self.WHITE, fontface, image, car, textsize, 1, xmax, xmid, xmin, ymax, ymid, ymin)
+                    # Count left-lane, right-lane as cars ymid crosses finish line
+                    # if xmid < 630:
+                    #     left_lane += 1
+                    # else:
+                    #     right_lane += 1
+                    # Stop tracking cars when they hit finish line
+                    del self.trackers[n]
+                else:
+                    # Rectangle and number on the cars we are tracking
+                    self.label_object(color, self.YELLOW, fontface, image, car, textsize, 4, xmax, xmid, xmin, ymax, ymid, ymin)
+            else:
+                if ymid <= self.START_LINE:
+                    self.label_object(self.WHITE, self.WHITE, fontface, image, car, textsize, 1, xmax, xmid, xmin, ymax, ymid, ymin)
+                    del self.trackers[n]
+                else:
+                    # Rectangle and number on the cars we are tracking
+                    self.label_object(color, self.YELLOW, fontface, image, car, textsize, 4, xmax, xmid, xmin, ymax, ymid, ymin)
+
+        # Add finish line overlay/line
+        overlay = image.copy()
+
+        # Shade region of interest (ROI). We're really just using the top line.
+        # cv2.rectangle(overlay,
+        #             (0, self.ROI_YMAX),
+        #             (self.FRAME_WIDTH, self.FRAME_HEIGHT), self.DARK_BLUE, cv2.FILLED)
+        # cv2.addWeighted(overlay, 0.6, image, 0.4, 0, image)
+
+        # Draw start line, if > 0
+        if self.START_LINE > 0:
+            cv2.line(image, (0, self.START_LINE), (self.FRAME_WIDTH, self.START_LINE), self.GRAY, 4, cv2.LINE_AA)
+        # Draw finish line with lane hash marks
+        cv2.line(image, (0, self.ROI_YMAX), (self.FRAME_WIDTH, self.ROI_YMAX), self.LIGHT_CYAN, 4, cv2.LINE_AA)
+        # cv2.line(image, (350, self.ROI_YMAX - 20), (350, self.ROI_YMAX + 20), self.LIGHT_CYAN, 4, cv2.LINE_AA)
+        # cv2.line(image, (630, self.ROI_YMAX - 20), (630, self.ROI_YMAX + 20), self.LIGHT_CYAN, 4, cv2.LINE_AA)
+        # cv2.line(image, (950, self.ROI_YMAX - 20), (950, self.ROI_YMAX + 20), self.LIGHT_CYAN, 4, cv2.LINE_AA)
+
+        # Add lane counter
+        # cv2.putText(image, "Lane counter:", (30, self.ROI_YMAX + 80), fontface, 1.5, self.LIGHT_CYAN, 4, cv2.LINE_AA)
+        # cv2.putText(image, str(left_lane), (480, self.ROI_YMAX + 80), fontface, 1.5, self.LIGHT_CYAN, 4, cv2.LINE_AA)
+        # cv2.putText(image, str(right_lane), (800, self.ROI_YMAX + 80), fontface, 1.5, self.LIGHT_CYAN, 4, cv2.LINE_AA)
+        # seconds = counters['frames'] / 18
+        # cv2.putText(image, "Cars/second:", (35, self.ROI_YMAX + 110), fontface, 0.5, self.LIGHT_CYAN, 1, cv2.LINE_AA)
+        # cv2.putText(image, '{0:.2f}'.format(left_lane / seconds), (480, self.ROI_YMAX + 110), fontface, 0.5, self.LIGHT_CYAN, 1, cv2.LINE_AA)
+        # cv2.putText(image, '{0:.2f}'.format(right_lane / seconds), (800, self.ROI_YMAX + 110), fontface, 0.5, self.LIGHT_CYAN, 1, cv2.LINE_AA)
+
+        counters['left_lane'] = left_lane
+        counters['right_lane'] = right_lane
+        return boxes, counters
+
+
+    def not_tracked(self,objects, boxes):
+        if not objects:
+            return []  # No new classified objects to search for
+        if not boxes:
+            return objects  # No existing boxes, return all objects
+
+        new_objects = []
+        for obj in objects:
+            ymin = obj.get("ymin", "")
+            ymax = obj.get("ymax", "")
+            ymid = int(round((ymin+ymax)/2))
+            xmin = obj.get("xmin", "")
+            xmax = obj.get("xmax", "")
+            xmid = int(round((xmin+xmax)/2))
+            # box_range = math.sqrt((xmax - xmin)**2 + (ymax - ymin)**2)
+            # box_range = math.sqrt((xmax - xmin)**2 + (ymax - ymin)**2)*2   #ljy
+            box_range = ((xmax - xmin) + (ymax - ymin))
+            for bbox in boxes:
+                bxmin = int(bbox[0])
+                bymin = int(bbox[1])
+                bxmax = int(bbox[0] + bbox[2])
+                bymax = int(bbox[1] + bbox[3])
+                bxmid = int((bxmin + bxmax) / 2)
+                bymid = int((bymin + bymax) / 2)
+                if math.sqrt((xmid - bxmid)**2 + (ymid - bymid)**2) < box_range:
+                    # found existing, so break (do not add to new_objects)
+                    break
+            else:
+                new_objects.append(obj)
+
+        return new_objects
+
+    def in_range(self,obj):
+        ymin = obj['ymin']
+        ymax = obj['ymax']
+        if ymin < self.START_LINE or ymax > self.ROI_YMAX:
+            # Don't add new trackers before start or after finish.
+            # Start line can help avoid overlaps and tracker loss.
+            # Finish line protection avoids counting the car twice.
+            return False
+        return True
+    
+    def add_new_object(self, obj, image, cars):
+        car = str(cars)
+        xmin = obj['xmin']
+        xmax = obj['xmax']
+        ymin = obj['ymin']
+        ymax = obj['ymax']
+        xmid = int(round((xmin+xmax)/2))
+        ymid = int(round((ymin+ymax)/2))
+        fontface = cv2.FONT_HERSHEY_SIMPLEX
+        fontscale = 1
+        thickness = 1
+        textsize, _baseline = cv2.getTextSize(
+            car, fontface, fontscale, thickness)
+
+        # init tracker
+        tracker = cv2.TrackerKCF_create()  # Note: Try comparing KCF with MIL
+        success = tracker.init(image, (xmin, ymin, xmax-xmin, ymax-ymin))
+        if success:
+            self.trackers.append((tracker, car))
+        self.label_object(self.GREEN, self.YELLOW, fontface, image, car, textsize, 4, xmax, xmid, xmin, ymax, ymid, ymin)
+
+
+
+
+
 
     def setModelTypeAsRetinaNet(self):
         """
@@ -1859,490 +2032,524 @@ class VideoObjectDetection:
                 "You must set 'output_video_filepath' to a valid video file name, in which the detected video will be saved. If you don't intend to save the detected video, set 'save_detected_video=False'")
 
         else:
-            try:
-                if (self.__modelType == "retinanet"):
-                    output_frames_dict = {}
-                    output_frames_count_dict = {}
+            # try:
+            if (self.__modelType == "retinanet"):
+                output_frames_dict = {}
+                output_frames_count_dict = {}
 
-                    input_video = cv2.VideoCapture(input_file_path)
-                    if (camera_input != None):
-                        input_video = camera_input
+                input_video = cv2.VideoCapture(input_file_path)
+                if (camera_input != None):
+                    input_video = camera_input
 
-                    output_video_filepath = output_file_path + '.avi'
+                output_video_filepath = output_file_path + '.avi'
 
-                    frame_width = int(input_video.get(3))
-                    frame_height = int(input_video.get(4))
-                    output_video = cv2.VideoWriter(output_video_filepath, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'),
-                                                   frames_per_second,
-                                                   (frame_width, frame_height))
+                frame_width = int(input_video.get(3))
+                frame_height = int(input_video.get(4))
+                output_video = cv2.VideoWriter(output_video_filepath, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'),
+                                                frames_per_second,
+                                                (frame_width, frame_height))
 
-                    counting = 0
-                    predicted_numbers = None
-                    scores = None
-                    detections = None
+                counting = 0
+                predicted_numbers = None
+                scores = None
+                detections = None
 
-                    model = self.__model_collection[0]
+                model = self.__model_collection[0]
 
-                    detection_timeout_count = 0
-                    video_frames_count = 0
+                detection_timeout_count = 0
+                video_frames_count = 0
 
-                    while (input_video.isOpened()):
-                        ret, frame = input_video.read()
+                #detect_results
+                objects=[]
 
-                        if (ret == True):
+                while (input_video.isOpened()):
+                    ret, frame = input_video.read()
+                    
 
-                            video_frames_count += 1
-                            if (detection_timeout != None):
-                                if ((video_frames_count % frames_per_second) == 0):
-                                    detection_timeout_count += 1
+                    if (ret == True):
 
-                                print(detection_timeout_count)
-                                print(video_frames_count)
-                                if (detection_timeout_count >= detection_timeout):
-                                    break
+                        frameinput=frame.copy()
+                        video_frames_count += 1
+                        if (detection_timeout != None):
+                            if ((video_frames_count % frames_per_second) == 0):
+                                detection_timeout_count += 1
 
-                            output_objects_array = []
+                            print(detection_timeout_count)
+                            print(video_frames_count)
+                            if (detection_timeout_count >= detection_timeout):
+                                break
 
-                            counting += 1
+                        output_objects_array = []
 
-                            if (log_progress == True):
-                                print("Processing Frame : ", str(counting))
+                        counting += 1
 
-                            detected_copy = frame.copy()
-                            detected_copy = cv2.cvtColor(detected_copy, cv2.COLOR_BGR2RGB)
+                        if (log_progress == True):
+                            print("Processing Frame : ", str(counting))
 
-                            frame = preprocess_image(frame)
-                            frame, scale = resize_image(frame, min_side=self.__input_image_min,
-                                                        max_side=self.__input_image_max)
+                        detected_copy = frame.copy()
+                        detected_copy = cv2.cvtColor(detected_copy, cv2.COLOR_BGR2RGB)
 
-                            check_frame_interval = counting % frame_detection_interval
+                        frame = preprocess_image(frame)
+                        frame, scale = resize_image(frame, min_side=self.__input_image_min,
+                                                    max_side=self.__input_image_max)
 
-                            if (counting == 1 or check_frame_interval == 0):
-                                _, _, detections = model.predict_on_batch(np.expand_dims(frame, axis=0))
-                                predicted_numbers = np.argmax(detections[0, :, 4:], axis=1)
-                                scores = detections[0, np.arange(detections.shape[1]), 4 + predicted_numbers]
+                        check_frame_interval = counting % frame_detection_interval
 
-                                detections[0, :, :4] /= scale
+                        if (counting == 1 or check_frame_interval == 0):
+                            _, _, detections = model.predict_on_batch(np.expand_dims(frame, axis=0))
+                            predicted_numbers = np.argmax(detections[0, :, 4:], axis=1)
+                            scores = detections[0, np.arange(detections.shape[1]), 4 + predicted_numbers]
 
-                            min_probability = minimum_percentage_probability / 100
+                            detections[0, :, :4] /= scale
 
-                            self.i=0
-                            for index, (label, score), in enumerate(zip(predicted_numbers, scores)):
-                                if score < min_probability:
+                        min_probability = minimum_percentage_probability / 100
+
+                        self.i=0
+                        for index, (label, score), in enumerate(zip(predicted_numbers, scores)):
+                            if score < min_probability:
+                                continue
+
+                            if (custom_objects != None):
+                                check_name = self.numbers_to_names[label]
+                                if (custom_objects[check_name] == "invalid"):
                                     continue
 
-                                if (custom_objects != None):
-                                    check_name = self.numbers_to_names[label]
-                                    if (custom_objects[check_name] == "invalid"):
-                                        continue
+                            color = label_color(label)
 
-                                color = label_color(label)
+                            detection_details = detections[0, index, :4].astype(int)
+                            # draw_box(detected_copy, detection_details, color=color)
+                            
+                            
 
-                                detection_details = detections[0, index, :4].astype(int)
-                                draw_box(detected_copy, detection_details, color=color)
-                                
+                            # if (display_object_name == True and display_pelrcentage_probability == True):
+                                # caption = "{} {:.1f} ".format(self.i,self.heading[self.i])
+                                # draw_caption(detected_copy, detection_details, caption)
+                                # caption = "{} {:.3f}".format(self.numbers_to_names[label], (score * 100))
+                            #     draw_caption(detected_copy, detection_details, caption)
+                            #     # caption = "{:.3f} ".format(self.heading[0])
+                            #     # caption = "{} ".format("heading")
+                            #     # draw_caption(detected_copy, detection_details, caption)
+                            # elif (display_object_name == True):
+                            #     caption = "{} ".format(self.numbers_to_names[label])
+                            #     draw_caption(detected_copy, detection_details, caption)
+                            # elif (display_percentage_probability == True):
+                            #     caption = " {:.3f}".format((score * 100))
+                            #     draw_caption(detected_copy, detection_details, caption)
 
-                                if (display_object_name == True and display_percentage_probability == True):
-                                    caption = "{} {:.1f} ".format(self.i,self.heading[self.i])
-                                    draw_caption(detected_copy, detection_details, caption)
-                                    # caption = "{} {:.3f}".format(self.numbers_to_names[label], (score * 100))
-                                #     draw_caption(detected_copy, detection_details, caption)
-                                #     # caption = "{:.3f} ".format(self.heading[0])
-                                #     # caption = "{} ".format("heading")
-                                #     # draw_caption(detected_copy, detection_details, caption)
-                                # elif (display_object_name == True):
-                                #     caption = "{} ".format(self.numbers_to_names[label])
-                                #     draw_caption(detected_copy, detection_details, caption)
-                                # elif (display_percentage_probability == True):
-                                #     caption = " {:.3f}".format((score * 100))
-                                #     draw_caption(detected_copy, detection_details, caption)
+                            # self.i=self.i+1
+                            each_object_details = {}
+                            each_object_details["name"] = self.numbers_to_names[label]
+                            each_object_details["percentage_probability"] = score * 100
+                            each_object_details["box_points"] = detection_details
+                            output_objects_array.append(each_object_details)
+                            detection={}
+                            midx=(detection_details[0]+detection_details[2])/2
+                            midy=(detection_details[1]+detection_details[3])/2
+                            detection['ymax']=int(round((detection_details[3]+midy)/2))
+                            detection['xmax']=int(round((detection_details[2]+midx)/2))
+                            detection['xmin']=int(round((detection_details[0]+midx)/2))
+                            detection['ymin']=int(round((detection_details[1]+midy)/2))
+                            objects.append(detection)
 
-                                self.i=self.i+1
-                                each_object_details = {}
-                                each_object_details["name"] = self.numbers_to_names[label]
-                                each_object_details["percentage_probability"] = score * 100
-                                each_object_details["box_points"] = detection_details
-                                output_objects_array.append(each_object_details)
 
-                            output_frames_dict[counting] = output_objects_array
 
-                            output_objects_count = {}
-                            for eachItem in output_objects_array:
-                                eachItemName = eachItem["name"]
-                                try:
-                                    output_objects_count[eachItemName] = output_objects_count[eachItemName] + 1
-                                except:
-                                    output_objects_count[eachItemName] = 1
+                        counters = {
+                            'left_lane':  0,
+                            'right_lane':  0,
+                            'lost_trackers': 0,
+                            'frames': 0}
+                        
+                        #track and add new object
+                        boxes, counters = self.update_trackers(detected_copy, counters)
+                        for obj in self.not_tracked(objects, boxes):
+                            if self.in_range(obj):
+                                self.cars += 1
+                                self.add_new_object(obj, detected_copy, self.cars)  # Label and start tracking
+                        objects.clear()
 
-                            output_frames_count_dict[counting] = output_objects_count
+                        output_frames_dict[counting] = output_objects_array
 
-                            detected_copy = cv2.cvtColor(detected_copy, cv2.COLOR_BGR2RGB)
 
-                            if (save_detected_video == True):
-                                output_video.write(detected_copy)
 
-                            if (per_frame_function != None):
+
+
+                        output_objects_count = {}
+                        for eachItem in output_objects_array:
+                            eachItemName = eachItem["name"]
+                            try:
+                                output_objects_count[eachItemName] = output_objects_count[eachItemName] + 1
+                            except:
+                                output_objects_count[eachItemName] = 1
+
+                        output_frames_count_dict[counting] = output_objects_count
+
+                        detected_copy = cv2.cvtColor(detected_copy, cv2.COLOR_BGR2RGB)
+
+                        if (save_detected_video == True):
+                            output_video.write(detected_copy)
+
+                        if (per_frame_function != None):
+                            if (return_detected_frame == True):
+                                per_frame_function(counting, output_objects_array, output_objects_count,
+                                                    detected_copy)
+                            elif (return_detected_frame == False):
+                                per_frame_function(counting, output_objects_array, output_objects_count)
+
+                        if (per_second_function != None):
+                            if (counting != 1 and (counting % frames_per_second) == 0):
+
+                                this_second_output_object_array = []
+                                this_second_counting_array = []
+                                this_second_counting = {}
+
+                                for aa in range(counting):
+                                    if (aa >= (counting - frames_per_second)):
+                                        this_second_output_object_array.append(output_frames_dict[aa + 1])
+                                        this_second_counting_array.append(output_frames_count_dict[aa + 1])
+
+                                for eachCountingDict in this_second_counting_array:
+                                    for eachItem in eachCountingDict:
+                                        try:
+                                            this_second_counting[eachItem] = this_second_counting[eachItem] + \
+                                                                                eachCountingDict[eachItem]
+                                        except:
+                                            this_second_counting[eachItem] = eachCountingDict[eachItem]
+
+                                for eachCountingItem in this_second_counting:
+                                    this_second_counting[eachCountingItem] = this_second_counting[
+                                                                                    eachCountingItem] / frames_per_second
+
                                 if (return_detected_frame == True):
-                                    per_frame_function(counting, output_objects_array, output_objects_count,
-                                                       detected_copy)
+                                    per_second_function(int(counting / frames_per_second),
+                                                        this_second_output_object_array, this_second_counting_array,
+                                                        this_second_counting, detected_copy)
+
                                 elif (return_detected_frame == False):
-                                    per_frame_function(counting, output_objects_array, output_objects_count)
+                                    per_second_function(int(counting / frames_per_second),
+                                                        this_second_output_object_array, this_second_counting_array,
+                                                        this_second_counting)
 
-                            if (per_second_function != None):
-                                if (counting != 1 and (counting % frames_per_second) == 0):
+                        if (per_minute_function != None):
 
-                                    this_second_output_object_array = []
-                                    this_second_counting_array = []
-                                    this_second_counting = {}
+                            if (counting != 1 and (counting % (frames_per_second * 60)) == 0):
 
-                                    for aa in range(counting):
-                                        if (aa >= (counting - frames_per_second)):
-                                            this_second_output_object_array.append(output_frames_dict[aa + 1])
-                                            this_second_counting_array.append(output_frames_count_dict[aa + 1])
+                                this_minute_output_object_array = []
+                                this_minute_counting_array = []
+                                this_minute_counting = {}
 
-                                    for eachCountingDict in this_second_counting_array:
-                                        for eachItem in eachCountingDict:
-                                            try:
-                                                this_second_counting[eachItem] = this_second_counting[eachItem] + \
-                                                                                 eachCountingDict[eachItem]
-                                            except:
-                                                this_second_counting[eachItem] = eachCountingDict[eachItem]
+                                for aa in range(counting):
+                                    if (aa >= (counting - (frames_per_second * 60))):
+                                        this_minute_output_object_array.append(output_frames_dict[aa + 1])
+                                        this_minute_counting_array.append(output_frames_count_dict[aa + 1])
 
-                                    for eachCountingItem in this_second_counting:
-                                        this_second_counting[eachCountingItem] = this_second_counting[
-                                                                                     eachCountingItem] / frames_per_second
+                                for eachCountingDict in this_minute_counting_array:
+                                    for eachItem in eachCountingDict:
+                                        try:
+                                            this_minute_counting[eachItem] = this_minute_counting[eachItem] + \
+                                                                                eachCountingDict[eachItem]
+                                        except:
+                                            this_minute_counting[eachItem] = eachCountingDict[eachItem]
 
-                                    if (return_detected_frame == True):
-                                        per_second_function(int(counting / frames_per_second),
-                                                            this_second_output_object_array, this_second_counting_array,
-                                                            this_second_counting, detected_copy)
+                                for eachCountingItem in this_minute_counting:
+                                    this_minute_counting[eachCountingItem] = this_minute_counting[
+                                                                                    eachCountingItem] / (
+                                                                                    frames_per_second * 60)
 
-                                    elif (return_detected_frame == False):
-                                        per_second_function(int(counting / frames_per_second),
-                                                            this_second_output_object_array, this_second_counting_array,
-                                                            this_second_counting)
+                                if (return_detected_frame == True):
+                                    per_minute_function(int(counting / (frames_per_second * 60)),
+                                                        this_minute_output_object_array, this_minute_counting_array,
+                                                        this_minute_counting, detected_copy)
 
-                            if (per_minute_function != None):
-
-                                if (counting != 1 and (counting % (frames_per_second * 60)) == 0):
-
-                                    this_minute_output_object_array = []
-                                    this_minute_counting_array = []
-                                    this_minute_counting = {}
-
-                                    for aa in range(counting):
-                                        if (aa >= (counting - (frames_per_second * 60))):
-                                            this_minute_output_object_array.append(output_frames_dict[aa + 1])
-                                            this_minute_counting_array.append(output_frames_count_dict[aa + 1])
-
-                                    for eachCountingDict in this_minute_counting_array:
-                                        for eachItem in eachCountingDict:
-                                            try:
-                                                this_minute_counting[eachItem] = this_minute_counting[eachItem] + \
-                                                                                 eachCountingDict[eachItem]
-                                            except:
-                                                this_minute_counting[eachItem] = eachCountingDict[eachItem]
-
-                                    for eachCountingItem in this_minute_counting:
-                                        this_minute_counting[eachCountingItem] = this_minute_counting[
-                                                                                     eachCountingItem] / (
-                                                                                     frames_per_second * 60)
-
-                                    if (return_detected_frame == True):
-                                        per_minute_function(int(counting / (frames_per_second * 60)),
-                                                            this_minute_output_object_array, this_minute_counting_array,
-                                                            this_minute_counting, detected_copy)
-
-                                    elif (return_detected_frame == False):
-                                        per_minute_function(int(counting / (frames_per_second * 60)),
-                                                            this_minute_output_object_array, this_minute_counting_array,
-                                                            this_minute_counting)
+                                elif (return_detected_frame == False):
+                                    per_minute_function(int(counting / (frames_per_second * 60)),
+                                                        this_minute_output_object_array, this_minute_counting_array,
+                                                        this_minute_counting)
 
 
-                        else:
-                            break
+                    else:
+                        break
 
-                    if (video_complete_function != None):
+                if (video_complete_function != None):
 
-                        this_video_output_object_array = []
-                        this_video_counting_array = []
-                        this_video_counting = {}
+                    this_video_output_object_array = []
+                    this_video_counting_array = []
+                    this_video_counting = {}
 
-                        for aa in range(counting):
-                            this_video_output_object_array.append(output_frames_dict[aa + 1])
-                            this_video_counting_array.append(output_frames_count_dict[aa + 1])
+                    for aa in range(counting):
+                        this_video_output_object_array.append(output_frames_dict[aa + 1])
+                        this_video_counting_array.append(output_frames_count_dict[aa + 1])
 
-                        for eachCountingDict in this_video_counting_array:
-                            for eachItem in eachCountingDict:
-                                try:
-                                    this_video_counting[eachItem] = this_video_counting[eachItem] + \
-                                                                    eachCountingDict[eachItem]
-                                except:
-                                    this_video_counting[eachItem] = eachCountingDict[eachItem]
+                    for eachCountingDict in this_video_counting_array:
+                        for eachItem in eachCountingDict:
+                            try:
+                                this_video_counting[eachItem] = this_video_counting[eachItem] + \
+                                                                eachCountingDict[eachItem]
+                            except:
+                                this_video_counting[eachItem] = eachCountingDict[eachItem]
 
-                        for eachCountingItem in this_video_counting:
-                            this_video_counting[eachCountingItem] = this_video_counting[
-                                                                        eachCountingItem] / counting
+                    for eachCountingItem in this_video_counting:
+                        this_video_counting[eachCountingItem] = this_video_counting[
+                                                                    eachCountingItem] / counting
 
-                        video_complete_function(this_video_output_object_array, this_video_counting_array,
-                                                this_video_counting)
+                    video_complete_function(this_video_output_object_array, this_video_counting_array,
+                                            this_video_counting)
 
-                    input_video.release()
-                    output_video.release()
+                input_video.release()
+                output_video.release()
 
-                    if (save_detected_video == True):
-                        return output_video_filepath
+                if (save_detected_video == True):
+                    return output_video_filepath
 
 
-                elif (self.__modelType == "yolov3" or self.__modelType == "tinyyolov3"):
-                    output_frames_dict = {}
-                    output_frames_count_dict = {}
+            elif (self.__modelType == "yolov3" or self.__modelType == "tinyyolov3"):
+                output_frames_dict = {}
+                output_frames_count_dict = {}
 
-                    input_video = cv2.VideoCapture(input_file_path)
-                    if (camera_input != None):
-                        input_video = camera_input
+                input_video = cv2.VideoCapture(input_file_path)
+                if (camera_input != None):
+                    input_video = camera_input
 
-                    output_video_filepath = output_file_path + '.avi'
+                output_video_filepath = output_file_path + '.avi'
 
-                    frame_width = int(input_video.get(3))
-                    frame_height = int(input_video.get(4))
-                    output_video = cv2.VideoWriter(output_video_filepath, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'),
-                                                   frames_per_second,
-                                                   (frame_width, frame_height))
+                frame_width = int(input_video.get(3))
+                frame_height = int(input_video.get(4))
+                output_video = cv2.VideoWriter(output_video_filepath, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'),
+                                                frames_per_second,
+                                                (frame_width, frame_height))
 
-                    counting = 0
-                    out_boxes = None
-                    out_scores = None
-                    out_classes = None
+                counting = 0
+                out_boxes = None
+                out_scores = None
+                out_classes = None
 
-                    model = self.__model_collection[0]
+                model = self.__model_collection[0]
 
-                    detection_timeout_count = 0
-                    video_frames_count = 0
+                detection_timeout_count = 0
+                video_frames_count = 0
 
-                    while (input_video.isOpened()):
-                        ret, frame = input_video.read()
+                while (input_video.isOpened()):
+                    ret, frame = input_video.read()
 
-                        if (ret == True):
+                    if (ret == True):
 
-                            video_frames_count += 1
-                            if (detection_timeout != None):
-                                if ((video_frames_count % frames_per_second) == 0):
-                                    detection_timeout_count += 1
+                        video_frames_count += 1
+                        if (detection_timeout != None):
+                            if ((video_frames_count % frames_per_second) == 0):
+                                detection_timeout_count += 1
 
-                                print(detection_timeout_count)
-                                print(video_frames_count)
-                                if (detection_timeout_count >= detection_timeout):
-                                    break
+                            print(detection_timeout_count)
+                            print(video_frames_count)
+                            if (detection_timeout_count >= detection_timeout):
+                                break
 
-                            output_objects_array = []
+                        output_objects_array = []
 
-                            counting += 1
+                        counting += 1
 
-                            if (log_progress == True):
-                                print("Processing Frame : ", str(counting))
+                        if (log_progress == True):
+                            print("Processing Frame : ", str(counting))
 
-                            detected_copy = frame.copy()
-                            detected_copy = cv2.cvtColor(detected_copy, cv2.COLOR_BGR2RGB)
+                        detected_copy = frame.copy()
+                        detected_copy = cv2.cvtColor(detected_copy, cv2.COLOR_BGR2RGB)
 
-                            frame = Image.fromarray(np.uint8(frame))
+                        frame = Image.fromarray(np.uint8(frame))
 
-                            new_image_size = (self.__yolo_model_image_size[0] - (self.__yolo_model_image_size[0] % 32),
-                                              self.__yolo_model_image_size[1] - (self.__yolo_model_image_size[1] % 32))
-                            boxed_image = letterbox_image(frame, new_image_size)
-                            image_data = np.array(boxed_image, dtype="float32")
+                        new_image_size = (self.__yolo_model_image_size[0] - (self.__yolo_model_image_size[0] % 32),
+                                            self.__yolo_model_image_size[1] - (self.__yolo_model_image_size[1] % 32))
+                        boxed_image = letterbox_image(frame, new_image_size)
+                        image_data = np.array(boxed_image, dtype="float32")
 
-                            image_data /= 255.
-                            image_data = np.expand_dims(image_data, 0)
+                        image_data /= 255.
+                        image_data = np.expand_dims(image_data, 0)
 
-                            check_frame_interval = counting % frame_detection_interval
+                        check_frame_interval = counting % frame_detection_interval
 
-                            if (counting == 1 or check_frame_interval == 0):
-                                out_boxes, out_scores, out_classes = self.sess.run(
-                                    [self.__yolo_boxes, self.__yolo_scores, self.__yolo_classes],
-                                    feed_dict={
-                                        model.input: image_data,
-                                        self.__yolo_input_image_shape: [frame.size[1], frame.size[0]],
-                                        K.learning_phase(): 0
-                                    })
+                        if (counting == 1 or check_frame_interval == 0):
+                            out_boxes, out_scores, out_classes = self.sess.run(
+                                [self.__yolo_boxes, self.__yolo_scores, self.__yolo_classes],
+                                feed_dict={
+                                    model.input: image_data,
+                                    self.__yolo_input_image_shape: [frame.size[1], frame.size[0]],
+                                    K.learning_phase(): 0
+                                })
 
-                            min_probability = minimum_percentage_probability / 100
+                        min_probability = minimum_percentage_probability / 100
 
-                            for a, b in reversed(list(enumerate(out_classes))):
-                                predicted_class = self.numbers_to_names[b]
-                                box = out_boxes[a]
-                                score = out_scores[a]
+                        for a, b in reversed(list(enumerate(out_classes))):
+                            predicted_class = self.numbers_to_names[b]
+                            box = out_boxes[a]
+                            score = out_scores[a]
 
-                                if score < min_probability:
+                            if score < min_probability:
+                                continue
+
+                            if (custom_objects != None):
+                                if (custom_objects[predicted_class] == "invalid"):
                                     continue
 
-                                if (custom_objects != None):
-                                    if (custom_objects[predicted_class] == "invalid"):
-                                        continue
+                            label = "{} {:.2f}".format(predicted_class, score)
 
-                                label = "{} {:.2f}".format(predicted_class, score)
+                            top, left, bottom, right = box
+                            top = max(0, np.floor(top + 0.5).astype('int32'))
+                            left = max(0, np.floor(left + 0.5).astype('int32'))
+                            bottom = min(frame.size[1], np.floor(bottom + 0.5).astype('int32'))
+                            right = min(frame.size[0], np.floor(right + 0.5).astype('int32'))
 
-                                top, left, bottom, right = box
-                                top = max(0, np.floor(top + 0.5).astype('int32'))
-                                left = max(0, np.floor(left + 0.5).astype('int32'))
-                                bottom = min(frame.size[1], np.floor(bottom + 0.5).astype('int32'))
-                                right = min(frame.size[0], np.floor(right + 0.5).astype('int32'))
+                            try:
+                                color = label_color(b)
+                            except:
+                                color = (255, 0, 0)
 
-                                try:
-                                    color = label_color(b)
-                                except:
-                                    color = (255, 0, 0)
+                            detection_details = (left, top, right, bottom)
+                            draw_box(detected_copy, detection_details, color=color)
 
-                                detection_details = (left, top, right, bottom)
-                                draw_box(detected_copy, detection_details, color=color)
+                            if (display_object_name == True and display_percentage_probability == True):
+                                draw_caption(detected_copy, detection_details, label)
+                            elif (display_object_name == True):
+                                draw_caption(detected_copy, detection_details, predicted_class)
+                            elif (display_percentage_probability == True):
+                                draw_caption(detected_copy, detection_details, str(score * 100))
 
-                                if (display_object_name == True and display_percentage_probability == True):
-                                    draw_caption(detected_copy, detection_details, label)
-                                elif (display_object_name == True):
-                                    draw_caption(detected_copy, detection_details, predicted_class)
-                                elif (display_percentage_probability == True):
-                                    draw_caption(detected_copy, detection_details, str(score * 100))
+                            each_object_details = {}
+                            each_object_details["name"] = predicted_class
+                            each_object_details["percentage_probability"] = score * 100
+                            each_object_details["box_points"] = detection_details
+                            output_objects_array.append(each_object_details)
 
-                                each_object_details = {}
-                                each_object_details["name"] = predicted_class
-                                each_object_details["percentage_probability"] = score * 100
-                                each_object_details["box_points"] = detection_details
-                                output_objects_array.append(each_object_details)
+                        output_frames_dict[counting] = output_objects_array
 
-                            output_frames_dict[counting] = output_objects_array
+                        output_objects_count = {}
+                        for eachItem in output_objects_array:
+                            eachItemName = eachItem["name"]
+                            try:
+                                output_objects_count[eachItemName] = output_objects_count[eachItemName] + 1
+                            except:
+                                output_objects_count[eachItemName] = 1
 
-                            output_objects_count = {}
-                            for eachItem in output_objects_array:
-                                eachItemName = eachItem["name"]
-                                try:
-                                    output_objects_count[eachItemName] = output_objects_count[eachItemName] + 1
-                                except:
-                                    output_objects_count[eachItemName] = 1
+                        output_frames_count_dict[counting] = output_objects_count
 
-                            output_frames_count_dict[counting] = output_objects_count
+                        detected_copy = cv2.cvtColor(detected_copy, cv2.COLOR_BGR2RGB)
 
-                            detected_copy = cv2.cvtColor(detected_copy, cv2.COLOR_BGR2RGB)
+                        if (save_detected_video == True):
+                            output_video.write(detected_copy)
 
-                            if (save_detected_video == True):
-                                output_video.write(detected_copy)
+                        if (per_frame_function != None):
+                            if (return_detected_frame == True):
+                                per_frame_function(counting, output_objects_array, output_objects_count,
+                                                    detected_copy)
+                            elif (return_detected_frame == False):
+                                per_frame_function(counting, output_objects_array, output_objects_count)
 
-                            if (per_frame_function != None):
+                        if (per_second_function != None):
+                            if (counting != 1 and (counting % frames_per_second) == 0):
+
+                                this_second_output_object_array = []
+                                this_second_counting_array = []
+                                this_second_counting = {}
+
+                                for aa in range(counting):
+                                    if (aa >= (counting - frames_per_second)):
+                                        this_second_output_object_array.append(output_frames_dict[aa + 1])
+                                        this_second_counting_array.append(output_frames_count_dict[aa + 1])
+
+                                for eachCountingDict in this_second_counting_array:
+                                    for eachItem in eachCountingDict:
+                                        try:
+                                            this_second_counting[eachItem] = this_second_counting[eachItem] + \
+                                                                                eachCountingDict[eachItem]
+                                        except:
+                                            this_second_counting[eachItem] = eachCountingDict[eachItem]
+
+                                for eachCountingItem in this_second_counting:
+                                    this_second_counting[eachCountingItem] = this_second_counting[
+                                                                                    eachCountingItem] / frames_per_second
+
                                 if (return_detected_frame == True):
-                                    per_frame_function(counting, output_objects_array, output_objects_count,
-                                                       detected_copy)
+                                    per_second_function(int(counting / frames_per_second),
+                                                        this_second_output_object_array, this_second_counting_array,
+                                                        this_second_counting, detected_copy)
+
                                 elif (return_detected_frame == False):
-                                    per_frame_function(counting, output_objects_array, output_objects_count)
+                                    per_second_function(int(counting / frames_per_second),
+                                                        this_second_output_object_array, this_second_counting_array,
+                                                        this_second_counting)
 
-                            if (per_second_function != None):
-                                if (counting != 1 and (counting % frames_per_second) == 0):
+                        if (per_minute_function != None):
 
-                                    this_second_output_object_array = []
-                                    this_second_counting_array = []
-                                    this_second_counting = {}
+                            if (counting != 1 and (counting % (frames_per_second * 60)) == 0):
 
-                                    for aa in range(counting):
-                                        if (aa >= (counting - frames_per_second)):
-                                            this_second_output_object_array.append(output_frames_dict[aa + 1])
-                                            this_second_counting_array.append(output_frames_count_dict[aa + 1])
+                                this_minute_output_object_array = []
+                                this_minute_counting_array = []
+                                this_minute_counting = {}
 
-                                    for eachCountingDict in this_second_counting_array:
-                                        for eachItem in eachCountingDict:
-                                            try:
-                                                this_second_counting[eachItem] = this_second_counting[eachItem] + \
-                                                                                 eachCountingDict[eachItem]
-                                            except:
-                                                this_second_counting[eachItem] = eachCountingDict[eachItem]
+                                for aa in range(counting):
+                                    if (aa >= (counting - (frames_per_second * 60))):
+                                        this_minute_output_object_array.append(output_frames_dict[aa + 1])
+                                        this_minute_counting_array.append(output_frames_count_dict[aa + 1])
 
-                                    for eachCountingItem in this_second_counting:
-                                        this_second_counting[eachCountingItem] = this_second_counting[
-                                                                                     eachCountingItem] / frames_per_second
+                                for eachCountingDict in this_minute_counting_array:
+                                    for eachItem in eachCountingDict:
+                                        try:
+                                            this_minute_counting[eachItem] = this_minute_counting[eachItem] + \
+                                                                                eachCountingDict[eachItem]
+                                        except:
+                                            this_minute_counting[eachItem] = eachCountingDict[eachItem]
 
-                                    if (return_detected_frame == True):
-                                        per_second_function(int(counting / frames_per_second),
-                                                            this_second_output_object_array, this_second_counting_array,
-                                                            this_second_counting, detected_copy)
+                                for eachCountingItem in this_minute_counting:
+                                    this_minute_counting[eachCountingItem] = this_minute_counting[
+                                                                                    eachCountingItem] / (
+                                                                                    frames_per_second * 60)
 
-                                    elif (return_detected_frame == False):
-                                        per_second_function(int(counting / frames_per_second),
-                                                            this_second_output_object_array, this_second_counting_array,
-                                                            this_second_counting)
+                                if (return_detected_frame == True):
+                                    per_minute_function(int(counting / (frames_per_second * 60)),
+                                                        this_minute_output_object_array, this_minute_counting_array,
+                                                        this_minute_counting, detected_copy)
 
-                            if (per_minute_function != None):
-
-                                if (counting != 1 and (counting % (frames_per_second * 60)) == 0):
-
-                                    this_minute_output_object_array = []
-                                    this_minute_counting_array = []
-                                    this_minute_counting = {}
-
-                                    for aa in range(counting):
-                                        if (aa >= (counting - (frames_per_second * 60))):
-                                            this_minute_output_object_array.append(output_frames_dict[aa + 1])
-                                            this_minute_counting_array.append(output_frames_count_dict[aa + 1])
-
-                                    for eachCountingDict in this_minute_counting_array:
-                                        for eachItem in eachCountingDict:
-                                            try:
-                                                this_minute_counting[eachItem] = this_minute_counting[eachItem] + \
-                                                                                 eachCountingDict[eachItem]
-                                            except:
-                                                this_minute_counting[eachItem] = eachCountingDict[eachItem]
-
-                                    for eachCountingItem in this_minute_counting:
-                                        this_minute_counting[eachCountingItem] = this_minute_counting[
-                                                                                     eachCountingItem] / (
-                                                                                     frames_per_second * 60)
-
-                                    if (return_detected_frame == True):
-                                        per_minute_function(int(counting / (frames_per_second * 60)),
-                                                            this_minute_output_object_array, this_minute_counting_array,
-                                                            this_minute_counting, detected_copy)
-
-                                    elif (return_detected_frame == False):
-                                        per_minute_function(int(counting / (frames_per_second * 60)),
-                                                            this_minute_output_object_array, this_minute_counting_array,
-                                                            this_minute_counting)
+                                elif (return_detected_frame == False):
+                                    per_minute_function(int(counting / (frames_per_second * 60)),
+                                                        this_minute_output_object_array, this_minute_counting_array,
+                                                        this_minute_counting)
 
 
-                        else:
-                            break
+                    else:
+                        break
 
-                    if (video_complete_function != None):
+                if (video_complete_function != None):
 
-                        this_video_output_object_array = []
-                        this_video_counting_array = []
-                        this_video_counting = {}
+                    this_video_output_object_array = []
+                    this_video_counting_array = []
+                    this_video_counting = {}
 
-                        for aa in range(counting):
-                            this_video_output_object_array.append(output_frames_dict[aa + 1])
-                            this_video_counting_array.append(output_frames_count_dict[aa + 1])
+                    for aa in range(counting):
+                        this_video_output_object_array.append(output_frames_dict[aa + 1])
+                        this_video_counting_array.append(output_frames_count_dict[aa + 1])
 
-                        for eachCountingDict in this_video_counting_array:
-                            for eachItem in eachCountingDict:
-                                try:
-                                    this_video_counting[eachItem] = this_video_counting[eachItem] + \
-                                                                    eachCountingDict[eachItem]
-                                except:
-                                    this_video_counting[eachItem] = eachCountingDict[eachItem]
+                    for eachCountingDict in this_video_counting_array:
+                        for eachItem in eachCountingDict:
+                            try:
+                                this_video_counting[eachItem] = this_video_counting[eachItem] + \
+                                                                eachCountingDict[eachItem]
+                            except:
+                                this_video_counting[eachItem] = eachCountingDict[eachItem]
 
-                        for eachCountingItem in this_video_counting:
-                            this_video_counting[eachCountingItem] = this_video_counting[
-                                                                        eachCountingItem] / counting
+                    for eachCountingItem in this_video_counting:
+                        this_video_counting[eachCountingItem] = this_video_counting[
+                                                                    eachCountingItem] / counting
 
-                        video_complete_function(this_video_output_object_array, this_video_counting_array,
-                                                this_video_counting)
+                    video_complete_function(this_video_output_object_array, this_video_counting_array,
+                                            this_video_counting)
 
-                    input_video.release()
-                    output_video.release()
+                input_video.release()
+                output_video.release()
 
-                    if (save_detected_video == True):
-                        return output_video_filepath
+                if (save_detected_video == True):
+                    return output_video_filepath
 
 
-            except:
-                raise ValueError(
-                    "An error occured. It may be that your input video is invalid. Ensure you specified a proper string value for 'output_file_path' is 'save_detected_video' is not False. "
-                    "Also ensure your per_frame, per_second, per_minute or video_complete_analysis function is properly configured to receive the right parameters. ")
+            # except:
+            #     raise ValueError(
+            #         "An error occured. It may be that your input video is invalid. Ensure you specified a proper string value for 'output_file_path' is 'save_detected_video' is not False. "
+            #         "Also ensure your per_frame, per_second, per_minute or video_complete_analysis function is properly configured to receive the right parameters. ")
 
 
 
